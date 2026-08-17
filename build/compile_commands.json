@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/Users/ibrahimnadeem/Downloads/Botanist/build",
+  "command": "/usr/bin/c++ -Dabsorptivity_EXPORTS -I/Users/ibrahimnadeem/miniforge3/include/python3.9 -isystem /Users/ibrahimnadeem/miniforge3/include -isystem /Users/ibrahimnadeem/miniforge3/include/python3.13 -g -std=gnu++11 -arch arm64 -fPIC -fvisibility=hidden -o CMakeFiles/absorptivity.dir/molar_absorptivity.cpp.o -c /Users/ibrahimnadeem/Downloads/Botanist/molar_absorptivity.cpp",
+  "file": "/Users/ibrahimnadeem/Downloads/Botanist/molar_absorptivity.cpp",
+  "output": "CMakeFiles/absorptivity.dir/molar_absorptivity.cpp.o"
+}
+]
