@@ -1,14 +1,17 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <array>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <string>
+#include <dlfcn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h> //crucial: makes python lists and c++ vectors compatible
 
@@ -18,59 +21,68 @@
 3. utilize c++ library of computational commands to perform analysis (and output things like spectrography plots?)
 4. add an argparse (help and info) so that you can use terminal commands with the project!-------e.g. ```UV_plot -name "Jacaranda mimosifolia" -verbose```
 
-Because C++ supports function overloading, the compiler secretly changes function names, so use the extern "C" modifier to your functions, which tells the compiler to keep the name exactly as written
-c.f. https://share.google/aimode/lfeUkixpX63JgVRDW
-For plants, add in (a properly weighted) chlorophyll a and b absorption spectrum. c.f.3 https://www.sciencedirect.com/science/article/pii/S0034425708000813
+For plants, add in (a properly weighted) chlorophyll a and b absorption spectrum. c.f. https://www.sciencedirect.com/science/article/pii/S0034425708000813
+(chlorophyll a/b reference curves are staged in empirical_spectra/ by fetch_empirical_spectra.sh; not yet wired into the chromophore pipeline below -- that's a later step)
+
+Structural data (bond order, aromaticity/ring membership, formal charge, H counts) is now forwarded directly from
+RDKit via main.py instead of being reconstructed by re-parsing the SMILES string here. That reconstruction (and the
+O(E*(V+E)) per-edge ring-detection DFS it required) has been removed; see build_bond_graph().
 */
 
-std::vector<std::vector<int>> groupings(const std::vector<std::vector<int>>& adj_matrix, const int num_atoms, const int desired_val) {
-    std::vector<std::vector<int>> groups; 
-    std::vector<bool> visited(num_atoms, false); //keep outside to preserve state
+// ---------------------------------------------------------------------------
+// Sparse per-edge storage: an organic molecule's bond graph has O(n) edges,
+// so we key edge attributes (conjugation status / bond order / ring membership)
+// by an order-independent pair hash instead of allocating O(n^2) dense matrices.
+// ---------------------------------------------------------------------------
+inline long long edge_key(int a, int b) {
+    if (a > b) std::swap(a, b);
+    return (static_cast<long long>(a) << 32) | static_cast<unsigned int>(b);
+}
+inline int edge_lookup(const std::unordered_map<long long,int>& m, int a, int b) {
+    std::unordered_map<long long,int>::const_iterator it = m.find(edge_key(a, b));
+    return it == m.end() ? 0 : it->second;
+}
 
-    for (int i=0; i<num_atoms; i++) {
-        if (!visited[i]) {
-            std::vector<int> current_group;
-            std::vector<int> stack = {i};
+// groupings(): connected components restricted to edges whose status == desired_val.
+// O(n + m) BFS over the adjacency list (previously O(n^2): a dense adjacency-matrix scan per atom).
+std::vector<std::vector<int>> groupings(const std::vector<std::vector<int>>& neighbors,
+                                         const std::unordered_map<long long,int>& edge_status,
+                                         const int num_atoms, const int desired_val) {
+    std::vector<std::vector<int>> groups;
+    std::vector<bool> visited(num_atoms, false);
 
-            while (!stack.empty()) {
-                int atom_idx = stack.back();
-                stack.pop_back();
-
-                if (!visited[atom_idx]) {
-                    visited[atom_idx] = true;
-                    current_group.push_back(atom_idx);
-
-                    //scan neighbors in the adjacency matrix
-                    for (int j=0; j<num_atoms; j++) {
-                        if (adj_matrix[atom_idx][j] == desired_val && !visited[j]) {
-                            stack.push_back(j);
-                        }
-                    }
-                }
+    for (int i = 0; i < num_atoms; i++) {
+        if (visited[i]) continue;
+        std::vector<int> current_group;
+        std::vector<int> stack = {i};
+        while (!stack.empty()) {
+            int atom_idx = stack.back();
+            stack.pop_back();
+            if (visited[atom_idx]) continue;
+            visited[atom_idx] = true;
+            current_group.push_back(atom_idx);
+            for (int j : neighbors[atom_idx]) {
+                if (!visited[j] && edge_lookup(edge_status, atom_idx, j) == desired_val) stack.push_back(j);
             }
-            groups.push_back(std::move(current_group)); //Move optimization
         }
+        groups.push_back(std::move(current_group));
     }
     return groups;
 }
 
-
 //only accepting analysis in the wavelength range where individual atom absorptivities are negligible (and other data may be flawed anyway in the vacuum UV range) : 120-800nm (far UV - very near IR)
-std::vector<int> cache; //stores memory from last input
+std::vector<std::pair<int,double>> cache; //stores memory from last input: (wavenumber in cm^-1, amplitude)
 
 struct BondGraph {
     std::vector<int> atomic_num;
     std::vector<int> pi_electrons;
-    std::vector<std::vector<int>> neighbors;
-    std::vector<std::vector<int>> conjugated;
-    std::vector<std::vector<int>> order;
+    std::vector<int> total_h;
+    std::vector<int> formal_charge;
+    std::vector<std::vector<int>> neighbors;       //adjacency list, O(n+m)
+    std::unordered_map<long long,int> conjugated;  //edge -> bond status (0 none / 1 bond / 2 conjugated)
+    std::unordered_map<long long,int> order;       //edge -> explicit bond order (1/2/3), Kekulized on the python side
+    std::unordered_map<long long,int> ring_bond;   //edge -> 1 if the bond is in a ring
     std::vector<bool> atom_in_ring;
-    std::vector<std::vector<bool>> bond_in_ring;
-};
-
-struct SmilesParse {
-    std::vector<int> atoms;
-    std::vector<std::array<int,3>> bonds;
 };
 
 struct EnoneAssignment {
@@ -83,199 +95,65 @@ struct EnoneAssignment {
     int base_nm = 212;
 };
 
-int element_z_from_symbol(std::string symbol) {
-    if (symbol.empty()) return 0;
-    symbol[0] = static_cast<char>(std::toupper(symbol[0]));
-    if (symbol.size() > 1) symbol[1] = static_cast<char>(std::tolower(symbol[1]));
+// A single detected chromophore, its rule-based lambda_max, and enough context to either
+// look up a matching empirical template or (for enones) split it when none is found.
+struct ChromophoreEstimate {
+    std::string base_type;
+    int lambda_nm = 0;
+    int double_bond_count = 0;
+    std::vector<int> atoms;
+    bool is_satellite = false; //secondary/extension piece from a split -> reduced amplitude weight
+    bool is_enone = false;
+    EnoneAssignment enone; //valid only when is_enone
+};
 
-    static const std::map<std::string,int> z = {
-        {"H",1},{"B",5},{"C",6},{"N",7},{"O",8},{"F",9},{"P",15},{"S",16},
-        {"Cl",17},{"Br",35},{"I",53},{"Zn",30}
-    };
-    std::map<std::string,int>::const_iterator it = z.find(symbol);
-    return it == z.end() ? 0 : it->second;
-}
-
-int smi_bond_order(const int pending, const bool left_aromatic, const bool right_aromatic) {
-    if (pending > 0) return pending;
-    return (left_aromatic && right_aromatic) ? 2 : 1;
-}
-
-SmilesParse parse_smiles_bonds(const std::string& smiles) {
-    SmilesParse parsed;
-    std::vector<bool> aromatic_atoms;
-    std::vector<int> branch_stack;
-    std::map<std::string, std::pair<int,int>> rings;
-    int previous = -1;
-    int pending_order = 0;
-
-    for (size_t i = 0; i < smiles.size(); ++i) {
-        char ch = smiles[i];
-        if (ch == '(') {
-            branch_stack.push_back(previous);
-            continue;
-        }
-        if (ch == ')') {
-            if (!branch_stack.empty()) {
-                previous = branch_stack.back();
-                branch_stack.pop_back();
-            }
-            continue;
-        }
-        if (ch == '.') {
-            previous = -1;
-            pending_order = 0;
-            continue;
-        }
-        if (ch == '-' || ch == '/' || ch == '\\') {
-            pending_order = 1;
-            continue;
-        }
-        if (ch == '=' || ch == ':') {
-            pending_order = 2;
-            continue;
-        }
-        if (ch == '#') {
-            pending_order = 3;
-            continue;
-        }
-
-        std::string ring_label;
-        if (ch == '%' && i + 2 < smiles.size() && std::isdigit(smiles[i + 1]) && std::isdigit(smiles[i + 2])) {
-            ring_label = smiles.substr(i + 1, 2);
-            i += 2;
-        } else if (std::isdigit(ch)) {
-            ring_label = std::string(1, ch);
-        }
-        if (!ring_label.empty()) {
-            std::map<std::string, std::pair<int,int>>::iterator it = rings.find(ring_label);
-            if (it == rings.end()) {
-                rings[ring_label] = std::make_pair(previous, pending_order);
-            } else if (previous >= 0 && it->second.first >= 0) {
-                int stored = it->second.second;
-                int order = pending_order > 0 ? pending_order : stored;
-                parsed.bonds.push_back({{it->second.first, previous, smi_bond_order(order, aromatic_atoms[it->second.first], aromatic_atoms[previous])}});
-                rings.erase(it);
-            }
-            pending_order = 0;
-            continue;
-        }
-
-        std::string symbol;
-        bool aromatic = false;
-        if (ch == '[') {
-            ++i;
-            while (i < smiles.size() && std::isdigit(smiles[i])) ++i;
-            if (i < smiles.size() && std::isalpha(smiles[i])) {
-                symbol = std::string(1, smiles[i]);
-                aromatic = std::islower(smiles[i]);
-                if (i + 1 < smiles.size() && std::islower(smiles[i + 1]) && std::isupper(smiles[i])) {
-                    symbol.push_back(smiles[++i]);
-                }
-            }
-            while (i < smiles.size() && smiles[i] != ']') ++i;
-        } else if (std::isalpha(ch)) {
-            symbol = std::string(1, ch);
-            aromatic = std::islower(ch);
-            if (i + 1 < smiles.size() && std::islower(smiles[i + 1]) && std::isupper(ch)) {
-                symbol.push_back(smiles[++i]);
-            }
-        }
-
-        int z = element_z_from_symbol(symbol);
-        if (z == 0) {
-            pending_order = 0;
-            continue;
-        }
-
-        int current = static_cast<int>(parsed.atoms.size());
-        parsed.atoms.push_back(z);
-        aromatic_atoms.push_back(aromatic);
-        if (previous >= 0) {
-            parsed.bonds.push_back({{previous, current, smi_bond_order(pending_order, aromatic_atoms[previous], aromatic_atoms[current])}});
-        }
-        previous = current;
-        pending_order = 0;
-    }
-    return parsed;
-}
-
-bool path_exists_without_edge(const std::vector<std::vector<int>>& neighbors, const int start, const int goal, const int skip_a, const int skip_b) {
-    std::vector<bool> seen(neighbors.size(), false);
-    std::vector<int> stack(1, start);
-    while (!stack.empty()) {
-        int cur = stack.back();
-        stack.pop_back();
-        if (cur == goal) return true;
-        if (seen[cur]) continue;
-        seen[cur] = true;
-        for (int next : neighbors[cur]) {
-            if ((cur == skip_a && next == skip_b) || (cur == skip_b && next == skip_a)) continue;
-            if (!seen[next]) stack.push_back(next);
-        }
-    }
-    return false;
-}
-
-BondGraph build_bond_graph(const size_t& num_atoms, const std::vector<std::pair<int,int>>& pi_electrons_ordered, const std::vector<std::array<int,5>>& bond_info, const std::string& smiles) {
+// ---------------------------------------------------------------------------
+// Graph construction: everything below (bond order, ring membership, formal charge,
+// total H count) is now forwarded from RDKit via main.py -- see analyze_conjugation().
+// This replaced a SMILES-string re-parser plus an O(E*(V+E)) per-edge "remove edge,
+// check connectivity" ring detector (path_exists_without_edge), both now unnecessary.
+// ---------------------------------------------------------------------------
+BondGraph build_bond_graph(const size_t& num_atoms,
+                            const std::vector<std::pair<int,int>>& pi_electrons_ordered,
+                            const std::vector<std::array<int,7>>& bond_info,
+                            const std::vector<std::array<int,5>>& atom_info) {
     BondGraph g;
     g.atomic_num.assign(num_atoms, 0);
     g.pi_electrons.assign(num_atoms, 0);
+    g.total_h.assign(num_atoms, 0);
+    g.formal_charge.assign(num_atoms, 0);
     g.neighbors.assign(num_atoms, std::vector<int>());
-    g.conjugated.assign(num_atoms, std::vector<int>(num_atoms, 0));
-    g.order.assign(num_atoms, std::vector<int>(num_atoms, 0));
     g.atom_in_ring.assign(num_atoms, false);
-    g.bond_in_ring.assign(num_atoms, std::vector<bool>(num_atoms, false));
 
-    for (const auto& pair : pi_electrons_ordered) {
-        if (pair.first >= 0 && static_cast<size_t>(pair.first) < num_atoms) g.pi_electrons[pair.first] = pair.second;
+    // atom_info: [idx, atomic_num, total_H, formal_charge, in_ring] -- covers every atom,
+    // including unbonded single-atom species (e.g. a bare ion like [Zn]) that have no entry in bond_info at all.
+    for (const auto& a : atom_info) {
+        int idx = a[0];
+        if (idx < 0 || static_cast<size_t>(idx) >= num_atoms) continue;
+        g.atomic_num[idx] = a[1];
+        g.total_h[idx] = a[2];
+        g.formal_charge[idx] = a[3];
+        g.atom_in_ring[idx] = a[4] != 0;
     }
-
+    for (const auto& p : pi_electrons_ordered) {
+        if (p.first >= 0 && static_cast<size_t>(p.first) < num_atoms) g.pi_electrons[p.first] = p.second;
+    }
+    // bond_info: [idx1, idx2, Z1, Z2, bond_status, bond_order, bond_in_ring?]
     for (const auto& bond : bond_info) {
         int a = bond[0], b = bond[1];
         if (a < 0 || b < 0 || static_cast<size_t>(a) >= num_atoms || static_cast<size_t>(b) >= num_atoms) continue;
-        g.atomic_num[a] = bond[2];
-        g.atomic_num[b] = bond[3];
         g.neighbors[a].push_back(b);
         g.neighbors[b].push_back(a);
-        g.conjugated[a][b] = bond[4];
-        g.conjugated[b][a] = bond[4];
+        long long key = edge_key(a, b);
+        g.conjugated[key] = bond[4];
+        g.order[key] = bond[5];
+        g.ring_bond[key] = bond[6];
     }
-
-    SmilesParse parsed = parse_smiles_bonds(smiles);
-    for (size_t i = 0; i < parsed.atoms.size() && i < num_atoms; ++i) {
-        if (g.atomic_num[i] == 0) g.atomic_num[i] = parsed.atoms[i];
-    }
-    for (const auto& bond : parsed.bonds) {
-        int a = bond[0], b = bond[1], order = bond[2];
-        if (a < 0 || b < 0 || static_cast<size_t>(a) >= num_atoms || static_cast<size_t>(b) >= num_atoms) continue;
-        g.order[a][b] = order;
-        g.order[b][a] = order;
-    }
-
-    for (size_t a = 0; a < g.neighbors.size(); ++a) {
-        for (int b : g.neighbors[a]) {
-            if (static_cast<int>(a) >= b) continue;
-            if (path_exists_without_edge(g.neighbors, static_cast<int>(a), b, static_cast<int>(a), b)) {
-                g.atom_in_ring[a] = true;
-                g.atom_in_ring[b] = true;
-                g.bond_in_ring[a][b] = true;
-                g.bond_in_ring[b][a] = true;
-            }
-        }
-    }
-
     return g;
 }
 
 bool is_double_like(const BondGraph& g, const int a, const int b) {
-    return g.order[a][b] == 2;
-}
-
-int count_h_neighbors(const BondGraph& g, const int atom) {
-    int count = 0;
-    for (int n : g.neighbors[atom]) if (g.atomic_num[n] == 1) ++count;
-    return count;
+    return edge_lookup(g.order, a, b) == 2;
 }
 
 bool has_carbonyl_oxygen(const BondGraph& g, const int carbon, int* oxygen_out = NULL) {
@@ -304,8 +182,17 @@ int woodward_base_value(const BondGraph& g, const int carbonyl, const int oxygen
     }
     if (acid) return 196;
     if (ester || single_o) return 195;
-    if (count_h_neighbors(g, carbonyl) > 0) return 218;
+    if (g.total_h[carbonyl] > 0) return 218; //O(1) via forwarded H count, was an O(degree) neighbor scan
     return 212;
+}
+
+std::string enone_base_type(int base_nm) {
+    switch (base_nm) {
+        case 196: return "acid_enone";
+        case 195: return "ester_enone";
+        case 218: return "aldehyde_enone";
+        default:  return "ketone_enone"; //212 and any other fallback
+    }
 }
 
 int count_component_double_bonds(const BondGraph& g, const std::vector<int>& component, const bool carbon_only) {
@@ -327,7 +214,8 @@ int count_exocyclic_double_bonds(const BondGraph& g, const std::vector<int>& com
     for (int a : component) {
         for (int b : g.neighbors[a]) {
             if (a >= b || atoms.count(b) == 0 || g.atomic_num[a] != 6 || g.atomic_num[b] != 6 || !is_double_like(g, a, b)) continue;
-            if (g.atom_in_ring[a] != g.atom_in_ring[b] || (g.atom_in_ring[a] && g.atom_in_ring[b] && !g.bond_in_ring[a][b])) ++count;
+            bool bond_in_ring = edge_lookup(g.ring_bond, a, b) == 1;
+            if (g.atom_in_ring[a] != g.atom_in_ring[b] || (g.atom_in_ring[a] && g.atom_in_ring[b] && !bond_in_ring)) ++count;
         }
     }
     return count;
@@ -339,7 +227,7 @@ int count_endocyclic_double_bonds(const BondGraph& g, const std::vector<int>& co
     for (int a : component) {
         for (int b : g.neighbors[a]) {
             if (a >= b || atoms.count(b) == 0 || g.atomic_num[a] != 6 || g.atomic_num[b] != 6 || !is_double_like(g, a, b)) continue;
-            if (g.bond_in_ring[a][b]) ++count;
+            if (edge_lookup(g.ring_bond, a, b) == 1) ++count;
         }
     }
     return count;
@@ -356,7 +244,7 @@ std::vector<int> conjugated_component(const BondGraph& g, const int start) {
         seen[cur] = true;
         result.push_back(cur);
         for (int next : g.neighbors[cur]) {
-            if (g.conjugated[cur][next] == 2 && !seen[next]) stack.push_back(next);
+            if (edge_lookup(g.conjugated, cur, next) == 2 && !seen[next]) stack.push_back(next);
         }
     }
     return result;
@@ -369,7 +257,7 @@ std::vector<EnoneAssignment> find_enones(const BondGraph& g) {
         int oxygen = -1;
         if (!has_carbonyl_oxygen(g, static_cast<int>(c), &oxygen)) continue;
         for (int alpha : g.neighbors[c]) {
-            if (g.atomic_num[alpha] != 6 || alpha == oxygen || g.conjugated[c][alpha] != 2) continue;
+            if (g.atomic_num[alpha] != 6 || alpha == oxygen || edge_lookup(g.conjugated, static_cast<int>(c), alpha) != 2) continue;
             for (int beta : g.neighbors[alpha]) {
                 if (beta == static_cast<int>(c) || g.atomic_num[beta] != 6 || !is_double_like(g, alpha, beta)) continue;
                 if (seen.count(std::make_pair(static_cast<int>(c), beta))) continue;
@@ -389,7 +277,7 @@ std::vector<EnoneAssignment> find_enones(const BondGraph& g) {
                     stack.pop_back();
                     int next_pos = std::min(4, item.position_by_atom[cur] + 1);
                     for (int next : g.neighbors[cur]) {
-                        if (next == static_cast<int>(c) || g.atomic_num[next] != 6 || g.conjugated[cur][next] != 2) continue;
+                        if (next == static_cast<int>(c) || g.atomic_num[next] != 6 || edge_lookup(g.conjugated, cur, next) != 2) continue;
                         if (item.position_by_atom[next] == -1 || next_pos < item.position_by_atom[next]) {
                             item.position_by_atom[next] = next_pos;
                             stack.push_back(next);
@@ -405,7 +293,7 @@ std::vector<EnoneAssignment> find_enones(const BondGraph& g) {
 }
 
 int woodward_sub_value(const std::string& kind, const int pos) {
-    static const std::map<std::string, std::array<int,4>> values = {
+    static const std::map<std::string, std::array<int,4>> values = { // refined values, doi: 10.1021/jo01164a003 (via ChromoPredict, github.com/CompPhotoChem/ChromoPredict)
         {"alkoxy",  {{29, 22, 17, 31}}},
         {"hydroxy", {{38, 14, 50,  0}}},
         {"alkyl",   {{11, 19, 18, 18}}},
@@ -419,7 +307,7 @@ int woodward_sub_value(const std::string& kind, const int pos) {
 }
 
 int fieser_sub_value(const std::string& kind) {
-    static const std::map<std::string,int> values = {
+    static const std::map<std::string,int> values = { // doi: 10.1021/jo01164a003 (via ChromoPredict)
         {"alkoxy", 6}, {"alkyl", 5}, {"carboxy", 0}, {"dialkylamine", 60},
         {"halogen", 10}, {"phenoxy", 18}, {"thioether", 30}
     };
@@ -441,22 +329,20 @@ std::string substituent_kind(const BondGraph& g, const int anchor, const int sub
     }
     if (z == 8) {
         bool attached_carbon = false;
-        bool attached_h = false;
         bool attached_aromatic = false;
         for (int n : g.neighbors[sub_atom]) {
             if (n == anchor) continue;
             attached_carbon = attached_carbon || g.atomic_num[n] == 6;
-            attached_h = attached_h || g.atomic_num[n] == 1;
             attached_aromatic = attached_aromatic || (g.atomic_num[n] == 6 && g.pi_electrons[n] > 0);
         }
         if (attached_aromatic) return "phenoxy";
         if (attached_carbon) return "alkoxy";
-        if (attached_h || g.neighbors[sub_atom].size() == 1) return "hydroxy";
+        if (g.total_h[sub_atom] > 0 || g.neighbors[sub_atom].size() == 1) return "hydroxy"; //O(1) via forwarded H count
     }
     if (z == 6) {
         int oxygen = -1;
         if (has_carbonyl_oxygen(g, sub_atom, &oxygen)) return "carboxy";
-        if (g.pi_electrons[sub_atom] == 0 && g.conjugated[anchor][sub_atom] != 2) return "alkyl";
+        if (g.pi_electrons[sub_atom] == 0 && edge_lookup(g.conjugated, anchor, sub_atom) != 2) return "alkyl";
     }
     return "";
 }
@@ -512,16 +398,23 @@ bool component_contains_carbonyl(const BondGraph& g, const std::vector<int>& com
     return false;
 }
 
-std::vector<int> estimate_rule_based_lambdas(const BondGraph& g, const std::vector<std::vector<int>>& chromophores) {
-    std::vector<int> lambdas;
-    std::vector<EnoneAssignment> enones = find_enones(g);
-    for (const EnoneAssignment& enone : enones) {
+std::vector<ChromophoreEstimate> estimate_rule_based_lambdas(const BondGraph& g, const std::vector<std::vector<int>>& chromophores) {
+    std::vector<ChromophoreEstimate> estimates;
+    for (const EnoneAssignment& enone : find_enones(g)) {
         int double_count = count_component_double_bonds(g, enone.chromophore_atoms, false);
         int total = enone.base_nm;
         total += std::max(0, double_count - 2) * 30;
         total += woodward_substituent_increment(g, enone);
         total += 5 * count_exocyclic_double_bonds(g, enone.chromophore_atoms);
-        lambdas.push_back(total);
+
+        ChromophoreEstimate est;
+        est.base_type = enone_base_type(enone.base_nm);
+        est.lambda_nm = total;
+        est.double_bond_count = double_count;
+        est.atoms = enone.chromophore_atoms;
+        est.is_enone = true;
+        est.enone = enone;
+        estimates.push_back(std::move(est));
     }
 
     for (const std::vector<int>& component : chromophores) {
@@ -540,7 +433,13 @@ std::vector<int> estimate_rule_based_lambdas(const BondGraph& g, const std::vect
             int endo = count_endocyclic_double_bonds(g, component);
             int exo = count_exocyclic_double_bonds(g, component);
             double total = 114.0 + 5.0 * m + double_count * (48.0 - 1.7 * double_count) - 16.5 * endo - 10.0 * exo;
-            lambdas.push_back(static_cast<int>(std::round(total)));
+
+            ChromophoreEstimate est;
+            est.base_type = "extended_polyene";
+            est.lambda_nm = static_cast<int>(std::round(total));
+            est.double_bond_count = double_count;
+            est.atoms = component;
+            estimates.push_back(std::move(est));
         } else if (double_count >= 2) {
             bool cyclic = false;
             for (int atom : component) cyclic = cyclic || g.atom_in_ring[atom];
@@ -548,34 +447,183 @@ std::vector<int> estimate_rule_based_lambdas(const BondGraph& g, const std::vect
             int total = base + std::max(0, double_count - 2) * 30;
             total += fieser_substituent_increment(g, component);
             total += 5 * count_exocyclic_double_bonds(g, component);
-            lambdas.push_back(total);
+
+            ChromophoreEstimate est;
+            est.base_type = cyclic ? "diene_cyclic" : "diene_acyclic";
+            est.lambda_nm = total;
+            est.double_bond_count = double_count;
+            est.atoms = component;
+            estimates.push_back(std::move(est));
         }
     }
-
-    std::sort(lambdas.begin(), lambdas.end());
-    lambdas.erase(std::unique(lambdas.begin(), lambdas.end()), lambdas.end());
-    return lambdas;
+    return estimates;
 }
 
-std::vector<int> molecule_spectrum(const std::string& SMILES, const size_t& num_atoms, const std::vector<std::pair<int,int>>& pi_electrons_ordered, const std::vector<std::array<int,5>>& bond_info) { //returning a vector of ints since wavenumber is a large number for wavelength << 1 cm
+// ---------------------------------------------------------------------------
+// Empirical spectral template library: small digitized/parameterized (wavelength_nm, epsilon)
+// reference curves for each base chromophore class, loaded once from empirical_spectra/
+// (populated by fetch_empirical_spectra.sh) and cached for the lifetime of the process.
+// ---------------------------------------------------------------------------
+std::string module_directory() {
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void*>(&module_directory), &info) && info.dli_fname) {
+        std::string path(info.dli_fname);
+        size_t slash = path.find_last_of('/');
+        return slash == std::string::npos ? "." : path.substr(0, slash);
+    }
+    return ".";
+}
+
+std::map<std::string, std::vector<std::pair<double,double>>> load_empirical_library() {
+    std::map<std::string, std::vector<std::pair<double,double>>> library;
+    static const char* names[] = {"ketone_enone", "aldehyde_enone", "diene_acyclic", "diene_cyclic", "extended_polyene"};
+    std::string dir = module_directory() + "/empirical_spectra/";
+    for (const char* name : names) {
+        std::ifstream file(dir + name + ".csv");
+        if (!file.is_open()) continue;
+        std::vector<std::pair<double,double>> points;
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::replace(line.begin(), line.end(), ',', ' ');
+            std::istringstream iss(line);
+            double nm, eps;
+            if (iss >> nm >> eps) points.push_back(std::make_pair(nm, eps));
+        }
+        if (!points.empty()) library[name] = std::move(points);
+    }
+    // No separate heteroanular/homoanular-ring reference was sourced; the acyclic diene
+    // lineshape (re-centered/rescaled per fragment below) stands in for the cyclic case too.
+    if (!library.count("diene_cyclic") && library.count("diene_acyclic")) {
+        library["diene_cyclic"] = library["diene_acyclic"];
+    }
+    return library;
+}
+
+const std::map<std::string, std::vector<std::pair<double,double>>>& empirical_library() {
+    static std::map<std::string, std::vector<std::pair<double,double>>> library = load_empirical_library();
+    return library;
+}
+
+bool has_empirical_spectrum(const std::string& base_type) {
+    const auto& lib = empirical_library();
+    std::map<std::string, std::vector<std::pair<double,double>>>::const_iterator it = lib.find(base_type);
+    return it != lib.end() && !it->second.empty();
+}
+
+// Representative peak amplitude for a fragment. Polyenes/dienes use the standard Fieser-Kuhn
+// intensity rule (epsilon_max ~= 1.74e4 * n conjugated C=C bonds -- the amplitude counterpart of
+// the lambda_max formula already used above; see e.g. Pretsch/Buhlmann/Badertscher, "Structure
+// Determination of Organic Compounds"). Enones don't have as clean a closed-form amplitude rule,
+// so a representative order-of-magnitude K-band intensity is used instead -- documented as
+// approximate, not a per-molecule measurement.
+double representative_amplitude(const ChromophoreEstimate& est) {
+    double value;
+    if (est.base_type == "extended_polyene" || est.base_type.rfind("diene", 0) == 0) {
+        value = 1.74e4 * std::max(1, est.double_bond_count);
+    } else {
+        value = 1.0e4 + 1500.0 * std::max(0, est.double_bond_count - 2);
+    }
+    return est.is_satellite ? value * 0.35 : value; //split-off extension pieces read as a secondary/shoulder feature, not a second full band
+}
+
+// Shift a template curve in WAVELENGTH space (nm), not wavenumber space: Woodward-Fieser/Fieser-Kuhn
+// increments are additive in nm, and since wavenumber = 1e7/lambda, a uniform nm shift is NOT a uniform
+// cm^-1 shift (it varies roughly as 1/lambda^2). Converting to wavenumber only after shifting keeps every
+// line consistent with what the nm-based increment actually means.
+std::vector<std::pair<int,double>> build_modified_spectrum(const ChromophoreEstimate& est) {
+    const std::vector<std::pair<double,double>>& templ = empirical_library().at(est.base_type);
+    double template_peak_nm = templ.front().first, template_peak_eps = templ.front().second;
+    for (const auto& pt : templ) {
+        if (pt.second > template_peak_eps) { template_peak_eps = pt.second; template_peak_nm = pt.first; }
+    }
+    double delta_nm = est.lambda_nm - template_peak_nm;
+    double target_eps = representative_amplitude(est);
+    double scale = template_peak_eps > 0.0 ? target_eps / template_peak_eps : 1.0;
+
+    std::vector<std::pair<int,double>> out;
+    out.reserve(templ.size());
+    for (const auto& pt : templ) {
+        double shifted_nm = pt.first + delta_nm;
+        if (shifted_nm < 120.0 || shifted_nm > 800.0) continue; //stay within the analysis window
+        int wavenumber = static_cast<int>(std::lround(1.0e7 / shifted_nm)); //rounded wavenumber, cm^-1
+        out.push_back(std::make_pair(wavenumber, pt.second * scale));
+    }
+    return out;
+}
+
+// Split an enone lacking a direct template into its minimal Woodward core (carbonyl + O + Cα=Cβ,
+// keeping the FULL substituent-corrected lambda_max -- the substituents live on the core) plus a
+// secondary "extension" fragment covering any additional conjugated double bonds beyond that core,
+// classified and matched like an ordinary diene/polyene. Only meaningful when double_count > 2, and
+// only ever applied once (the recursive call below passes a null EnoneAssignment), which keeps the
+// process bounded: Woodward-Fieser rules only define a single flat "+30 nm per extra double bond"
+// extension term to begin with, so there's no deeper structure to recurse into.
+std::vector<ChromophoreEstimate> split_enone(const BondGraph& g, const EnoneAssignment& enone, int total_lambda, int double_count) {
+    std::vector<ChromophoreEstimate> parts;
+    if (double_count <= 2) return parts; //already minimal; nothing left to peel off
+
+    std::set<int> core_set = {enone.carbonyl, enone.oxygen, enone.alpha, enone.beta};
+    std::vector<int> core_atoms, tail_atoms;
+    for (int atom : enone.chromophore_atoms) (core_set.count(atom) ? core_atoms : tail_atoms).push_back(atom);
+    if (tail_atoms.empty()) return parts;
+
+    ChromophoreEstimate core;
+    core.base_type = enone_base_type(enone.base_nm);
+    core.lambda_nm = total_lambda; //keep the full, substituent-corrected value: this is where the real band sits
+    core.double_bond_count = 2;
+    core.atoms = core_atoms;
+    parts.push_back(std::move(core));
+
+    bool tail_cyclic = false;
+    for (int atom : tail_atoms) tail_cyclic = tail_cyclic || g.atom_in_ring[atom];
+    int tail_double_count = double_count - 2;
+    ChromophoreEstimate tail;
+    tail.base_type = (tail_double_count >= 4) ? "extended_polyene" : (tail_cyclic ? "diene_cyclic" : "diene_acyclic");
+    int tail_base = tail_cyclic ? 214 : 217;
+    tail.lambda_nm = tail_base + std::max(0, tail_double_count - 2) * 30; //unsubstituted extension estimate: substituents were already scored on the core
+    tail.double_bond_count = tail_double_count;
+    tail.atoms = tail_atoms;
+    tail.is_satellite = true;
+    parts.push_back(std::move(tail));
+    return parts;
+}
+
+std::vector<std::pair<int,double>> resolve_fragment(const BondGraph& g, const ChromophoreEstimate& est, const EnoneAssignment* enone_ref) {
+    if (has_empirical_spectrum(est.base_type)) return build_modified_spectrum(est);
+    if (enone_ref != NULL) {
+        std::vector<ChromophoreEstimate> parts = split_enone(g, *enone_ref, est.lambda_nm, est.double_bond_count);
+        if (!parts.empty()) {
+            std::vector<std::pair<int,double>> out;
+            for (const ChromophoreEstimate& part : parts) {
+                std::vector<std::pair<int,double>> sub = resolve_fragment(g, part, NULL); //one split only, see split_enone's note
+                out.insert(out.end(), sub.begin(), sub.end());
+            }
+            return out;
+        }
+    }
+    // Floor case: no template, and nothing left to split -- fall back to a single stick line
+    // at the rule-based peak (this is the only place a bare peak-only estimate can still occur).
+    int wavenumber = static_cast<int>(std::lround(1.0e7 / std::max(1, est.lambda_nm)));
+    return {std::make_pair(wavenumber, representative_amplitude(est))};
+}
+
+std::vector<std::pair<int,double>> molecule_spectrum(const std::string& SMILES, const size_t& num_atoms,
+                                                       const std::vector<std::pair<int,int>>& pi_electrons_ordered,
+                                                       const std::vector<std::array<int,7>>& bond_info,
+                                                       const std::vector<std::array<int,5>>& atom_info) { //returns (wavenumber cm^-1, amplitude) pairs
     cache.clear(); //clearing cache and memory for new decomposition
-    cache.shrink_to_fit(); 
+    cache.shrink_to_fit();
 
     //Step 1: Chromophore division
-    //let's try the adjacency matrix method for now, otherwise memory-optimized tree method
-    std::vector<std::vector<int>> adj_matrix(num_atoms, std::vector<int>(num_atoms, 0)); //nothing = 0, bonds = 1, conj bonds = 2
+    //adjacency-list + sparse edge maps: O(n + m), replacing the old O(n^2) dense adjacency-matrix build
+    BondGraph molecular_graph = build_bond_graph(num_atoms, pi_electrons_ordered, bond_info, atom_info);
+    int n = static_cast<int>(num_atoms);
 
     //NOTE: atom indices are 0-indexed!!!!!!
-    for (const auto& bond : bond_info) {
-        int idx1 = bond[0];
-        int idx2 = bond[1];
-        int bond_status = bond[4]; //bond status (nonexistent=0,exists=1,conjugated=2)
-        adj_matrix[idx1][idx2] = bond_status;
-        adj_matrix[idx2][idx1] = bond_status; //symmetrical entry since bond is bidirectional
-    }
-
-    std::vector<std::vector<int>> chromophores = groupings(adj_matrix, num_atoms, 2); //first we identify chromophores
-    std::vector<std::vector<int>> remainder_groups = groupings(adj_matrix, num_atoms, 1); // next we identify remainder groups between the chromophores
+    std::vector<std::vector<int>> chromophores = groupings(molecular_graph.neighbors, molecular_graph.conjugated, n, 2); //first we identify chromophores
+    std::vector<std::vector<int>> remainder_groups = groupings(molecular_graph.neighbors, molecular_graph.conjugated, n, 1); // next we identify remainder groups between the chromophores
+    (void)remainder_groups; //reserved for future auxochrome-context work; not yet consumed downstream
     //NOTE: the above are sets of unordered atom indices, but we don't need to sort them (yet)
 
     //Step 2: Auxochrome identification
@@ -593,30 +641,47 @@ std::vector<int> molecule_spectrum(const std::string& SMILES, const size_t& num_
     https://github.com/CompPhotoChem/ChromoPredict/blob/main/src/chromopredict/solvent.py
     */
 
-    BondGraph molecular_graph = build_bond_graph(num_atoms, pi_electrons_ordered, bond_info, SMILES);
-    std::vector<int> empirical_lambdas = estimate_rule_based_lambdas(molecular_graph, chromophores);
+    std::vector<ChromophoreEstimate> estimates = estimate_rule_based_lambdas(molecular_graph, chromophores);
 
+    std::cout << "=== ESTIMATES ===\n"; //DIAGNOSTIC
+    for (const auto& est : estimates) {
+        std::cout << est.base_type << " | lambda=" << est.lambda_nm << " nm | double_bonds=" << est.double_bond_count << " | atoms=" << est.atoms.size() << '\n';
+    }
     //Step 3: Modified spectra calculation and superposition
-    cache = empirical_lambdas;
+    //Each chromophore is matched against empirical_spectra/ (splitting extended enones once if there's no
+    //direct match -- see resolve_fragment/split_enone), shifted in nm-space to its rule-based lambda_max,
+    //rescaled to a representative amplitude, and the resulting lines from every fragment are pooled.
+    for (const ChromophoreEstimate& est : estimates) {
+        std::vector<std::pair<int,double>> piece = resolve_fragment(molecular_graph, est, est.is_enone ? &est.enone : NULL);
+        std::cout << "  -> spectral points: " << piece.size() << '\n'; //DIAGNOSTIC
+        cache.insert(cache.end(), piece.begin(), piece.end());
+    }
+    std::sort(cache.begin(), cache.end());
     return cache;
 }
 
-// inputs in bond_info: atom order/index 1 & 2, element 1 & 2 atomic numbers, bond status
+// inputs in bond_info: atom order/index 1 & 2, element 1 & 2 atomic numbers, bond status, bond order, bond-in-ring
+// inputs in atom_info: atom index, atomic number, total H count, formal charge, atom-in-ring
 /* Tests:
 BENZENE / C1=CC=CC=C1
 WATER,Rhizome / O
 TRANS-LINALOOL-OXIDE / C[C@]1(CC[C@H](O1)C(C)(C)O)C=C
 ZINC,Root,CID_23994,[Zn]
-
-after testing everything, remove unnecessary input parameters (above, below in the PYBIND11, and in the main.py file)
 */
 
 
 PYBIND11_MODULE(absorptivity, m) {
     m.doc() = "Absorptivity calculator (v0)";
-    m.def("compute_spectrum", [](const std::string SMILES, const int& num_atoms, const std::vector<std::pair<int,int>> pi_electrons_ordered, const std::vector<std::array<int,5>> bond_info) {
-        return molecule_spectrum(SMILES,num_atoms,pi_electrons_ordered,bond_info);
-    }, "Decomposes a molecule into chromophores and remainder groups. It then identifies auxochromes within each chromophore, calculates the modified spectra, and superposes to obtain the molecule's overall spectrum for 120-800 nm. Line positions and amplitudes are respected but not lineshape.");
+    m.def("compute_spectrum", [](const std::string SMILES, const int& num_atoms,
+                                  const std::vector<std::pair<int,int>> pi_electrons_ordered,
+                                  const std::vector<std::array<int,7>> bond_info,
+                                  const std::vector<std::array<int,5>> atom_info) {
+        return molecule_spectrum(SMILES, static_cast<size_t>(num_atoms), pi_electrons_ordered, bond_info, atom_info);
+    }, "Decomposes a molecule into chromophores and remainder groups, identifies auxochromes, matches (or "
+       "recursively splits, on a miss) each chromophore against a small empirical UV/Vis template library, and "
+       "superposes the shifted/rescaled templates into the molecule's overall spectrum for 120-800 nm as "
+       "(wavenumber cm^-1, amplitude) pairs. Amplitudes are per-chromophore relative intensities, not a "
+       "concentration/path-length-scaled absorbance.");
 }
 
 /*
