@@ -126,7 +126,10 @@ def analyze_chemical(compound_id): #make compound name an alternative argument
         e.by_id()
 
 def display_single(results):
-    x,y = zip(*results)
+    try:
+        x,y = zip(*results)
+    except ValueError as e:
+        sys.exit("It's probably the case that no absorption peaks were found because the C++ is faulty.")
     results = pl.DataFrame({"wavenumber": x, "amplitude": y})
     results = convolute(results)
 
@@ -149,21 +152,24 @@ class ARGPARSE_analyze_chemical_id(argparse.Action): #inheriting from the argpar
         display_single(result)
 class ARGPARSE_analyze_chemical_name(argparse.Action):
     def __call__(self, parser, namespace, input_name, option_string=None):
-        try:
+        try:                                    #NOTE: COPY THIS OVER TO ANALYZE_CHEMICAL_ID()
             name = input_name[0]
-            if name.count("-")>0: #e.g. (+)-DIHYDROCARVEOL     (TRYING TO FIND A (QUOTE-LIKE) CHARACTER THAT DOESN'T TRIGGER TERMINAL COMMAND RESPONSE)
-                if name.count("'")==2:
-                    name = name.split("'")[1] #removes quotation marks, which were only necessary for command processing
-                else:
-                    print(name, " quote count: ", name.count("'"))
-                    sys.exit("If your compound name has dashes, surround it with dollar signs (`) and try again")
+
+            # if name.count(",")>0:
+                # if name.count('"')==2 and name.count("'")==2: #entry format: "'[name]'"
+                #     name = name.split('"')[0].split("'")[0] #removes the 2 double-quotes and 2 single-quotes, which were only necessary for command processing
+                #     name = '"' + name + '"' #to not count comma as delimiter, csv enclosed names with commas in quotes
+                # elif name.count('"')==0:
+                #     print(name, " double-quote and single-quote count: ", name.count('"'), name.count("'"))
+                #     #sys.exit("If your compound name has dashes, surround it with dollar signs (`) and try again")
+                # else:
+                #     sys.exit("Did you forget some quotes?")
             name = name.replace(" ","-").upper() #standardizing the input name to match the dataset
-            if name.count(",")>0:
-                name = '"' + name + '"' #to not count comma as delimiter, csv enclosed names with commas in quotes
+            
             candidates = df.filter(pl.col("Chemical")==name)
             if not candidates.is_empty():
                 input_id = candidates.select("Compound_ID").to_numpy()[0][0]
-                input_id = input_id.split("_")[1] #since the format is CID_12345
+                input_id = input_id.split("_")[1] #since the format is CID_123456789
                 result = analyze_chemical(input_id)
                 setattr(namespace, self.dest, result)
                 display_single(result)
@@ -191,7 +197,7 @@ class ARGPARSE_multiple_chemical_names(argparse.Action):
                     if name.count('"')==2:
                         name = name.split('"')[1]
                     else:
-                        sys.exit("If some of your compound names have dashes, surround them with double quotation marks and try again")
+                        sys.exit("If some of your compound names have dashes, surround them with two double-quotes on either side and try again\n e.g. -n ""1,8-CINEOLE"" ")
                 name = name.replace(" ","-").upper()
                 if name.count(",")>0:
                     name = '"' + name + '"'

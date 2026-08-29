@@ -589,23 +589,38 @@ std::vector<ChromophoreEstimate> split_enone(const BondGraph& g, const EnoneAssi
     return parts;
 }
 
-std::vector<std::pair<int,double>> resolve_fragment(const BondGraph& g, const ChromophoreEstimate& est, const EnoneAssignment* enone_ref) {
-    if (has_empirical_spectrum(est.base_type)) return build_modified_spectrum(est);
-    if (enone_ref != NULL) {
-        std::vector<ChromophoreEstimate> parts = split_enone(g, *enone_ref, est.lambda_nm, est.double_bond_count);
+std::vector<std::pair<int,double>> resolve_fragment(
+    const BondGraph& g,
+    const ChromophoreEstimate& est,
+    const EnoneAssignment* enone_ref
+) {
+    // Extended enones must be decomposed before template matching.
+    if (enone_ref != NULL && est.double_bond_count > 2) {
+        std::vector<ChromophoreEstimate> parts =
+            split_enone(g, *enone_ref, est.lambda_nm, est.double_bond_count);
+
         if (!parts.empty()) {
             std::vector<std::pair<int,double>> out;
+
             for (const ChromophoreEstimate& part : parts) {
-                std::vector<std::pair<int,double>> sub = resolve_fragment(g, part, NULL); //one split only, see split_enone's note
+                std::vector<std::pair<int,double>> sub =
+                    resolve_fragment(g, part, NULL);
                 out.insert(out.end(), sub.begin(), sub.end());
             }
+
             return out;
         }
     }
-    // Floor case: no template, and nothing left to split -- fall back to a single stick line
-    // at the rule-based peak (this is the only place a bare peak-only estimate can still occur).
-    int wavenumber = static_cast<int>(std::lround(1.0e7 / std::max(1, est.lambda_nm)));
-    return {std::make_pair(wavenumber, representative_amplitude(est))};
+
+    if (has_empirical_spectrum(est.base_type))
+        return build_modified_spectrum(est);
+
+    // No empirical template: retain the existing fallback.
+    int wavenumber =
+        static_cast<int>(std::lround(
+            1.0e7 / std::max(1, est.lambda_nm)));
+
+    return {{wavenumber, representative_amplitude(est)}};
 }
 
 std::vector<std::pair<int,double>> molecule_spectrum(const std::string& SMILES, const size_t& num_atoms,
