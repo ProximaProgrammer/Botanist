@@ -21,4 +21,4 @@ analyze_plant: Opens a file selection window to choose the .csv and .pkl plant s
 
 # Code Examples
 
-![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif)
+![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif)
