@@ -4,7 +4,8 @@ A quick analyzer for plant compounds, either the compounds themselves entered by
 
 This particular tool computes an absorption or reflection spectrum for 120-800 nm, a bit broader than standard UV-Vis but just narrow enough to maintain fair accuracy for the methods used. 
 Crucially, it relies on the following dataset and is thus compound search is limited to what it contains: \
-https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \ (dataset owner: Yashasvi Goswami, data source: https://pubchem.ncbi.nlm.nih.gov/)
+https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \
+(dataset owner: Yashasvi Goswami, data source: https://pubchem.ncbi.nlm.nih.gov/)
 
 ## Capabilities 
 
