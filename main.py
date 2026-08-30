@@ -85,12 +85,12 @@ def convolute(peaks_df, min_v=int(1.0e7/800), max_v=1+int(1.0e7/120), step=1, HW
 
 class NotFoundError(Exception):
     def by_name(self):
-        sys.exit("Error: Compound not found. Please try alternative names or check the spelling/formatting. If sure your entry was correct, the dataset used may not include it.\nSee https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals")
+        sys.exit("Error: Compound not found. Please try alternative names or check the spelling/formatting. If sure your entry was correct, the dataset used may not include it.\n\n( See https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals )")
     def by_id(self):
-        sys.exit("Error: Compound not found. Please check the ID entered. If sure your entry was correct, the dataset used may not include it.\n( See https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals )")
+        sys.exit("Error: Compound not found. Please check the ID entered. If sure your entry was correct, the dataset used may not include it.\n\n( See https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals )")
 
 df = pl.read_csv(Path(__file__).resolve().parent / "prefphytochemicals.csv", has_header=True) #35254 rows, exluding header row, 21 columns
-df = df.unique(subset=["Compound_ID"])
+#df = df.unique(subset=["Compound_ID"])
 
 def analyze_chemical(compound_id): #make compound name an alternative argument
     try:
@@ -147,26 +147,17 @@ def display_multiple(results):
 
 class ARGPARSE_analyze_chemical_id(argparse.Action): #inheriting from the argparse.Action class to run analyze_chemical on the input after the -id flag
    def __call__(self, parser, namespace, input_id, option_string=None):
-        result = analyze_chemical(input_id)
+        id = input_id[0]
+        result = analyze_chemical(id)
         setattr(namespace, self.dest, result) #result saved to args.id
         display_single(result)
 class ARGPARSE_analyze_chemical_name(argparse.Action):
     def __call__(self, parser, namespace, input_name, option_string=None):
-        try:                                    #NOTE: COPY THIS OVER TO ANALYZE_CHEMICAL_ID()
+        try:
             name = input_name[0]
-
-            # if name.count(",")>0:
-                # if name.count('"')==2 and name.count("'")==2: #entry format: "'[name]'"
-                #     name = name.split('"')[0].split("'")[0] #removes the 2 double-quotes and 2 single-quotes, which were only necessary for command processing
-                #     name = '"' + name + '"' #to not count comma as delimiter, csv enclosed names with commas in quotes
-                # elif name.count('"')==0:
-                #     print(name, " double-quote and single-quote count: ", name.count('"'), name.count("'"))
-                #     #sys.exit("If your compound name has dashes, surround it with dollar signs (`) and try again")
-                # else:
-                #     sys.exit("Did you forget some quotes?")
             name = name.replace(" ","-").upper() #standardizing the input name to match the dataset
-            
             candidates = df.filter(pl.col("Chemical")==name)
+            #print(np.shape(df))
             if not candidates.is_empty():
                 input_id = candidates.select("Compound_ID").to_numpy()[0][0]
                 input_id = input_id.split("_")[1] #since the format is CID_123456789
@@ -174,7 +165,7 @@ class ARGPARSE_analyze_chemical_name(argparse.Action):
                 setattr(namespace, self.dest, result)
                 display_single(result)
             else:
-                raise NotFoundError
+                raise NotFoundError #redundant as we can simply call by_name() but good custom exceptions practice
         except NotFoundError as e:
             e.by_name()
 class ARGPARSE_multiple_chemical_ids(argparse.Action):
@@ -193,14 +184,7 @@ class ARGPARSE_multiple_chemical_names(argparse.Action):
         results = []
         for name in input_names:
             try:
-                if name.count("-")>0:
-                    if name.count('"')==2:
-                        name = name.split('"')[1]
-                    else:
-                        sys.exit("If some of your compound names have dashes, surround them with two double-quotes on either side and try again\n e.g. -n ""1,8-CINEOLE"" ")
                 name = name.replace(" ","-").upper()
-                if name.count(",")>0:
-                    name = '"' + name + '"'
                 candidates = df.filter(pl.col("Chemical")==name)
                 if not candidates.is_empty():
                     input_id = candidates.select("Compound_ID").to_numpy()[0][0]
@@ -220,10 +204,10 @@ parser = argparse.ArgumentParser(description="Plot absorption/reflection spectru
 parser.add_argument("-analyze_compound", action="store_true", help="An approximate absorption/reflection spectrum for 120-800 nm is computed for a single compound.")  
 parser.add_argument("-hide", action="store_true", help="Hides graphs. Must download data in a specified format instead.")
 parser.add_argument("-d", "--download", nargs=1, choices=["csv", "txt", "json"], help="Downloads graph-equivalent numeric data in tabular format. After this flag, specify 'csv', 'txt', or 'json'")
-parser.add_argument("-n", "--name", type=str, nargs=1, action=ARGPARSE_analyze_chemical_name, help="Enter name of a compound in the dataset. If not found, try alternative names.")
-parser.add_argument("--names", type=str, nargs="+", action=ARGPARSE_multiple_chemical_names, help="Enter the names of at least two compounds in the dataset. If not found, try alternative names.")
+parser.add_argument("-n", "--name", type=str, nargs=1, action=ARGPARSE_analyze_chemical_name, help="Enter name of a compound in the dataset. If not found, try alternative names. If some of your compound names have dashes, surround them with quotes on either side and try again\n e.g. -n '1,8-CINEOLE' ")
+parser.add_argument("--names", type=str, nargs="+", action=ARGPARSE_multiple_chemical_names, help="Enter the names of at least two compounds in the dataset. If not found, try alternative names. If some of your compound names have dashes, surround them with quotes on either side and try again\n e.g. -n '1,8-CINEOLE' ")
 parser.add_argument("-id", metavar="CID", type=int, nargs=1, action=ARGPARSE_analyze_chemical_id, help="Enter CID/compound ID (digits only): ")
-parser.add_argument("-ids", type=int, nargs="+", action=ARGPARSE_multiple_chemical_ids, help="Enter CID/Compound ID (digits only) of at least two compounds in the dataset.")
+parser.add_argument("-ids", metavar="CIDs", type=int, nargs="+", action=ARGPARSE_multiple_chemical_ids, help="Enter CID/Compound ID (digits only) of at least two compounds in the dataset.")
 parser.add_argument("-spectrum_type", choices=["absorption", "reflection"], help="Choose whether to compute molar [absorption] spectrum or [reflection] (observed) spectrum of compound.")
 class FileSelectAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):

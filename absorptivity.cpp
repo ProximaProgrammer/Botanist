@@ -252,7 +252,7 @@ std::vector<int> conjugated_component(const BondGraph& g, const int start) {
 
 std::vector<EnoneAssignment> find_enones(const BondGraph& g) {
     std::vector<EnoneAssignment> enones;
-    std::set<std::pair<int,int>> seen;
+    std::set<std::pair<int, std::vector<int>>> seen;
     for (size_t c = 0; c < g.atomic_num.size(); ++c) {
         int oxygen = -1;
         if (!has_carbonyl_oxygen(g, static_cast<int>(c), &oxygen)) continue;
@@ -260,8 +260,16 @@ std::vector<EnoneAssignment> find_enones(const BondGraph& g) {
             if (g.atomic_num[alpha] != 6 || alpha == oxygen || edge_lookup(g.conjugated, static_cast<int>(c), alpha) != 2) continue;
             for (int beta : g.neighbors[alpha]) {
                 if (beta == static_cast<int>(c) || g.atomic_num[beta] != 6 || !is_double_like(g, alpha, beta)) continue;
-                if (seen.count(std::make_pair(static_cast<int>(c), beta))) continue;
-                seen.insert(std::make_pair(static_cast<int>(c), beta));
+                    std::vector<int> component_key = conjugated_component(g, static_cast<int>(c));
+                    std::sort(component_key.begin(), component_key.end());
+
+                    std::pair<int, std::vector<int>> key(
+                        static_cast<int>(c),
+                        component_key
+                    );
+
+                    if (seen.count(key)) continue;
+                    seen.insert(key);
                 EnoneAssignment item;
                 item.carbonyl = static_cast<int>(c);
                 item.oxygen = oxygen;
@@ -454,6 +462,13 @@ std::vector<ChromophoreEstimate> estimate_rule_based_lambdas(const BondGraph& g,
             est.double_bond_count = double_count;
             est.atoms = component;
             estimates.push_back(std::move(est));
+        } else if (double_count == 1) {
+            ChromophoreEstimate est;
+            est.base_type = "single_alkene";
+            est.lambda_nm = 171;
+            est.double_bond_count = 1;
+            est.atoms = component;
+            estimates.push_back(std::move(est));
         }
     }
     return estimates;
@@ -476,7 +491,7 @@ std::string module_directory() {
 
 std::map<std::string, std::vector<std::pair<double,double>>> load_empirical_library() {
     std::map<std::string, std::vector<std::pair<double,double>>> library;
-    static const char* names[] = {"ketone_enone", "aldehyde_enone", "diene_acyclic", "diene_cyclic", "extended_polyene"};
+    static const char* names[] = {"single_alkene", "ketone_enone", "aldehyde_enone", "diene_acyclic", "diene_cyclic", "extended_polyene"};
     std::string dir = module_directory() + "/empirical_spectra/";
     for (const char* name : names) {
         std::ifstream file(dir + name + ".csv");
@@ -519,7 +534,10 @@ bool has_empirical_spectrum(const std::string& base_type) {
 // approximate, not a per-molecule measurement.
 double representative_amplitude(const ChromophoreEstimate& est) {
     double value;
-    if (est.base_type == "extended_polyene" || est.base_type.rfind("diene", 0) == 0) {
+    if (est.base_type == "single_alkene") {
+        value = 1.5e4;
+    } else if (est.base_type == "extended_polyene" ||
+            est.base_type.rfind("diene", 0) == 0) {
         value = 1.74e4 * std::max(1, est.double_bond_count);
     } else {
         value = 1.0e4 + 1500.0 * std::max(0, est.double_bond_count - 2);
