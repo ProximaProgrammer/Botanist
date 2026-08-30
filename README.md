@@ -3,8 +3,8 @@
 A quick analyzer for plant compounds, either the compounds themselves entered by name or id, or with a spectrometric input of a plant to break down (major) phytochemicals present with estimated percentages. It is 'quick' because it uses Woodward-Fieser rules in place of Density Functional Theory or other heavy computational methods, albeit compromising some accuracy. 
 
 This particular tool computes an absorption or reflection spectrum for 120-800 nm, a bit broader than standard UV-Vis but just narrow enough to maintain fair accuracy for the methods used. 
-Crucially, it relies on the following dataset and is thus compound search is limited to what it contains: \\
-https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals (dataset owner: Yashasvi Goswami, data source: https://pubchem.ncbi.nlm.nih.gov/)
+Crucially, it relies on the following dataset and is thus compound search is limited to what it contains: \
+https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \ (dataset owner: Yashasvi Goswami, data source: https://pubchem.ncbi.nlm.nih.gov/)
 
 ## Capabilities 
 
