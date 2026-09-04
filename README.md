@@ -17,7 +17,24 @@ https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \
 ## Unfinished
 
 - cannot analyze multiple compounds yet
-- failure to recognize spectral features for some compounds such as Acetic Acid and trace metals such as Gold
+- only absorption spectrum, no reflection spectrum
+- limited 
+
+- failure to recognize spectral features for some compounds such as Acetic Acid and trace metals such as Gold (though this is fundamentally a cost using the 'shortcut' methods this project is founded on)
+
+# Setup
+
+`
+git clone https://github.com/ProximaProgrammer/Botanist
+cd Botanist
+
+mkdir build && cd build
+cmake ..
+cmake --build . --config Release
+cd ..
+
+pip install .
+`
 
 # Code Examples
 
