@@ -25,15 +25,15 @@ https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \
 # Setup
 
 ```
-git clone https://github.com/ProximaProgrammer/Botanist
-cd Botanist
+$ git clone https://github.com/ProximaProgrammer/Botanist
+$ cd Botanist
 
-mkdir build && cd build
-cmake ..
-cmake --build . --config Release
-cd ..
+$ mkdir build && cd build
+$ cmake ..
+$ cmake --build . --config Release
+$ cd ..
 
-pip install .
+$ pip install .
 ```
 
 # Code Examples
