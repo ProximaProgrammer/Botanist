@@ -24,7 +24,7 @@ https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \
 
 # Setup
 
-`
+```
 git clone https://github.com/ProximaProgrammer/Botanist
 cd Botanist
 
@@ -34,7 +34,7 @@ cmake --build . --config Release
 cd ..
 
 pip install .
-`
+```
 
 # Code Examples
 
