@@ -10,9 +10,9 @@ https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \
 
 ## Capabilities 
 
-analyze_compound: Takes Compound ID or compound name and plots absorption/reflection spectrum of a phytocompound. Predict plausible concentrations of phytocompounds from observed color of a plant part. Can download data. Using the respective flags, one may analyze a single or multiple compounds by id or by name. If multiple compounds are analyzed, they will 
+***analyze_compound***: Takes Compound ID or compound name and plots absorption/reflection spectrum of a phytocompound. Predict plausible concentrations of phytocompounds from observed color of a plant part. Can download data. Using the respective flags, one may analyze a single or multiple compounds by id or by name. If multiple compounds are analyzed, they will 
 
-analyze_plant: Opens a file selection window to choose the .csv and .pkl plant spectrometry files. Estimated percentage concentrations of phytocompounds in the plant part will be computed. Can download data.
+***analyze_plant***: Opens a file selection window to choose the .csv and .pkl plant spectrometry files. Estimated percentage concentrations of phytocompounds in the plant part will be computed. Can download data.
 
 ## Unfinished
 
@@ -20,7 +20,16 @@ analyze_plant: Opens a file selection window to choose the .csv and .pkl plant s
 - failure to recognize spectral features for some compounds such as Acetic Acid and trace metals such as Gold
 
 # Code Examples
+`$ botanist -analyze_compound -n Caffeine -spectrum_type absorption`
 
-![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif) ![WIP](sussy.gif)
+```Electrons: total  102  | valence  74  | core  28
+=== ESTIMATES ===
+ketone_enone | lambda=272 nm | double_bonds=4 | atoms=11
+  -> spectral points: 242
+--displaying--
+[this should display a graph for the single compound specified]```
 
-> Built by Prox
+
+![WIP](sussy.gif)
+
+> Built by Prox (Discord: wprox)
