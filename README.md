@@ -20,14 +20,38 @@ https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \
 - failure to recognize spectral features for some compounds such as Acetic Acid and trace metals such as Gold
 
 # Code Examples
-`$ botanist -analyze_compound -n Caffeine -spectrum_type absorption`
 
-```Electrons: total  102  | valence  74  | core  28
+`botanist --help`          
+```
+usage: botanist [-h] [-analyze_compound] [-hide] [-d {csv,txt,json}] [-n NAME]
+                [--names NAMES [NAMES ...]] [-id CID] [-ids CIDs [CIDs ...]]
+                [-spectrum_type {absorption,reflection}] [--analyze_plant]
+                ...
+```
+
+`$ botanist -analyze_compound -n Caffeine -spectrum_type absorption`
+```
+Electrons: total  102  | valence  74  | core  28
 === ESTIMATES ===
 ketone_enone | lambda=272 nm | double_bonds=4 | atoms=11
   -> spectral points: 242
 --displaying--
-[this should display a graph for the single compound specified]```
+[this should display a graph for the single compound specified]
+```
+`botanist -analyze_compound -n "(-)-10-EPI-ALPHA-CYPERONE" -spectrum_type absorption`
+```
+Electrons: total  120  | valence  88  | core  32
+=== ESTIMATES ===
+ketone_enone | lambda=242 nm | double_bonds=2 | atoms=4
+  -> spectral points: 127
+--displaying--
+[this should display a graph for the single compound specified]
+```
+`botanist -analyze_plant`
+```
+--displaying--
+{'Total_Chlorophyll': 0.159, 'Total_Carotenoids': 0.012, 'Anthocyanins': 0.0, 'Total_Phenolics': 0.0}
+```
 
 
 ![WIP](sussy.gif)
