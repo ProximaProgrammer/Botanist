@@ -1,0 +1,9 @@
+README.md
+main.py
+pyproject.toml
+Botanist.egg-info/PKG-INFO
+Botanist.egg-info/SOURCES.txt
+Botanist.egg-info/dependency_links.txt
+Botanist.egg-info/entry_points.txt
+Botanist.egg-info/requires.txt
+Botanist.egg-info/top_level.txt

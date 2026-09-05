@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Botanist"
+version = "0.1.0"
+description = "See https://github.com"
+dependencies = [
+    "numpy",
+    "polars",
+    "matplotlib",
+    "rdkit"
+]
+
+[project.scripts]
+botanist = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "absorptivity"] # Explicitly lists only relevant modules so setuptools ignores CMake/build directories
+
+[tool.setuptools.package-data] # telling setuptools that root directory holds data files
+"*" = ["*.so", "*.pyd", "*.dylib", "*.csv"]

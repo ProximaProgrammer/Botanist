@@ -18,11 +18,12 @@ https://www.kaggle.com/datasets/yashasvigoswami/phytochemicals \
 
 - cannot analyze multiple compounds yet
 - only absorption spectrum, no reflection spectrum
-- limited 
+- cannot download data yet
+- currently very limited plant analysis
 
 - failure to recognize spectral features for some compounds such as Acetic Acid and trace metals such as Gold (though this is fundamentally a cost using the 'shortcut' methods this project is founded on)
 
-# Setup
+## Setup
 
 ```
 $ git clone https://github.com/ProximaProgrammer/Botanist
@@ -36,7 +37,7 @@ $ cd ..
 $ pip install .
 ```
 
-# Code Examples
+## Code Examples
 
 `$ botanist --help`          
 ```

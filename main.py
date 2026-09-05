@@ -74,12 +74,22 @@ def convolute(peaks_df, min_v=int(1.0e7/800), max_v=1+int(1.0e7/120), step=1, HW
     peaks = peaks_df["wavenumber"].to_numpy()
     amplitudes = peaks_df["amplitude"].to_numpy()
 
+    if len(amplitudes) == 0:
+        return pl.DataFrame({"wavenumber": np.arange(min_v, max_v, step), "amplitude": np.zeros(max_v - min_v)})
+
     v_grid = np.arange(min_v, max_v, step) #wavenumber axis grid with resolution determined by `step`
     relative_position = v_grid[:, None] - peaks[None, :] #this hack automatically shapes out a matrix with shape (len(x_grid),len(peaks)) so there's an axis/grid column for each peak
     line_shapes = np.exp(-np.log(2) * (relative_position/HWHM)**2)
-    total_absorption = np.dot(line_shapes, amplitudes) #adds an amplitude-weighted sum of gaussian intensity grids for each peak, superposing to form the displayed spectrum
+    total_absorption_raw = np.dot(line_shapes, amplitudes) #adds an amplitude-weighted sum of gaussian intensity grids for each peak, superposing to form the displayed spectrum
     # normalizing_factor = ((np.log(2)/np.pi)**0.5)/HWHM #multiply line_shapes by this to maintain same area, treating original peaks as delta functions with given amplitudes
     
+    target_max_epsilon = np.max(amplitudes)
+    current_max_absorption = np.max(total_absorption_raw)
+    if current_max_absorption > 0:
+        total_absorption = total_absorption_raw * (target_max_epsilon / current_max_absorption)
+    else:
+        total_absorption = total_absorption_raw
+
     return pl.DataFrame({"wavenumber": v_grid, "amplitude": total_absorption}) #reminder: this is (still) only *relative* amplitude since we didn't even normalize above
     #print(TEMP.sort("amplitude", descending=True).head(20))
 
@@ -92,7 +102,16 @@ class NotFoundError(Exception):
 df = pl.read_csv(Path(__file__).resolve().parent / "prefphytochemicals.csv", has_header=True) #35254 rows, exluding header row, 21 columns
 #df = df.unique(subset=["Compound_ID"])
 
-def analyze_chemical(compound_id): #make compound name an alternative argument
+class store_spectrum_type(argparse.Action): #this initially wasn't being called because the flag is later in order and the last one doesn't have the value of spectrum_type yet
+    def __call__(self, parser, namespace, input_type, option_string=None):
+        setattr(namespace, self.dest, input_type) #storing spectrum_type in the namespace for later use in analyze_chemical
+
+class store_concentration(argparse.Action):
+    def __call__(self, parser, namespace, value, option_string=None):
+        print("DEBUGGING | store_concentration storing value:", value)
+        setattr(namespace, self.dest, float(value))
+
+def analyze_chemical(compound_id, input_spectrum_type, input_compound_concentration="no concentration specified"): #make compound name an alternative argument
     try:
         compound_id = "CID_"+str(int(compound_id)) #tests if int was input as required
         n_row = np.argmax(df["Compound_ID"].to_numpy() == compound_id)
@@ -113,7 +132,14 @@ def analyze_chemical(compound_id): #make compound name an alternative argument
 
                 #sys.path.append(os.path.abspath(os.path.dirname(__file__)))
                 analyze_conj_pair = analyze_conjugation(mol)
-                return absorptivity.compute_spectrum(SMILES, analyze_conj_pair[0], analyze_conj_pair[1], analyze_conj_pair[2], analyze_conj_pair[3]) #test
+                if input_spectrum_type=="absorption":
+                    return absorptivity.compute_absorption_spectrum(SMILES, analyze_conj_pair[0], analyze_conj_pair[1], analyze_conj_pair[2], analyze_conj_pair[3])
+                if input_spectrum_type=="reflection":
+                    if input_compound_concentration == "no concentration specified":
+                        sys.exit("Error: must specify a numeric concentration (in M) with '-c' or '--concentration' after '-spectrum_type reflection'")
+                    return absorptivity.compute_reflection_spectrum(SMILES, analyze_conj_pair[0], analyze_conj_pair[1], analyze_conj_pair[2], analyze_conj_pair[3], input_compound_concentration)
+                else:
+                    sys.exit("Error: spectrum_type must be specified as either 'absorption' or 'reflection' when using -analyze_compound")
                 # Here we call the C++ module and eventually return an absorptivity for the compound, before having one last calculation here (in v1) to get the reflectance spectrum--which should appear continuous with small dips corresponding to absorption lines with their respective amplitudes.
                 # then a graph or two is displayed by analyze_chemical, and if verbosity=True, numeric data is open as well
             except subprocess.CalledProcessError as e:
@@ -125,18 +151,22 @@ def analyze_chemical(compound_id): #make compound name an alternative argument
     except NotFoundError as e:
         e.by_id()
 
-def display_single(results):
+def display_single(results,compound_name,spectrum_type):
     try:
         x,y = zip(*results)
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
         sys.exit("It's probably the case that no absorption peaks were found because the C++ is faulty.")
     results = pl.DataFrame({"wavenumber": x, "amplitude": y})
     results = convolute(results)
 
     plt.figure()
     plot = plt.plot(1.0e7/results["wavenumber"], results["amplitude"], lw=1)
+    plt.title("Woodward-Fieser Spectrum of " + compound_name)
     plt.xlabel("wavelength (nm)")
-    plt.ylabel("(relative) amplitude")
+    if spectrum_type == "absorption":
+        plt.ylabel("Molar Extinction Coefficient (M^-1 cm^-1)")
+    elif spectrum_type == "reflection":
+        plt.ylabel("Reflectance") #shouldn't this be normalized between 0 and 1?
     plt.xlim(120,800) #our wavelength range
     plt.show()
 
@@ -148,12 +178,21 @@ def display_multiple(results):
 class ARGPARSE_analyze_chemical_id(argparse.Action): #inheriting from the argparse.Action class to run analyze_chemical on the input after the -id flag
    def __call__(self, parser, namespace, input_id, option_string=None):
         id = input_id[0]
-        result = analyze_chemical(id)
-        setattr(namespace, self.dest, result) #result saved to args.id
-        display_single(result)
-class ARGPARSE_analyze_chemical_name(argparse.Action):
+        input_spectrum_type = getattr(namespace, 'spectrum_type', None) #fetch at runtime, not compiletime!
+        input_compound_concentration = getattr(namespace, 'concentration', None)
+
+        if input_spectrum_type == "absorption":
+            result = analyze_chemical(id, input_spectrum_type)
+        elif input_spectrum_type == "reflection":
+            result = analyze_chemical(id, input_spectrum_type, input_compound_concentration)
+        display_single(result, df.filter(pl.col("Compound_ID")=="CID_"+str(id)).select("Chemical").to_numpy()[0][0], input_spectrum_type) #fetching the compound name from the dataset for display purposes
+
+class ARGPARSE_analyze_chemical_name(argparse.Action):                           #NOTE: copy new code to the other 3 similar functions
     def __call__(self, parser, namespace, input_name, option_string=None):
         try:
+            input_spectrum_type = getattr(namespace, 'spectrum_type', None) #fetch at runtime, not compiletime!
+            input_compound_concentration = getattr(namespace, 'concentration', None)
+
             name = input_name[0]
             name = name.replace(" ","-").upper() #standardizing the input name to match the dataset
             candidates = df.filter(pl.col("Chemical")==name)
@@ -161,27 +200,38 @@ class ARGPARSE_analyze_chemical_name(argparse.Action):
             if not candidates.is_empty():
                 input_id = candidates.select("Compound_ID").to_numpy()[0][0]
                 input_id = input_id.split("_")[1] #since the format is CID_123456789
-                result = analyze_chemical(input_id)
-                setattr(namespace, self.dest, result)
-                display_single(result)
+                if input_spectrum_type == "absorption":
+                    result = analyze_chemical(input_id, input_spectrum_type)
+                elif input_spectrum_type == "reflection":
+                    result = analyze_chemical(input_id, input_spectrum_type, input_compound_concentration)
+                display_single(result,name,input_spectrum_type)
             else:
                 raise NotFoundError #redundant as we can simply call by_name() but good custom exceptions practice
         except NotFoundError as e:
             e.by_name()
+
 class ARGPARSE_multiple_chemical_ids(argparse.Action):
     def __call__(self, parser, namespace, input_ids, option_string=None):
         results = []
+        input_spectrum_type = getattr(namespace, 'spectrum_type', None)
+        input_compound_concentration = getattr(namespace, 'concentration', None)
+        
         for input_id in input_ids:
             try:
-                result = analyze_chemical(input_id)
+                if input_spectrum_type == "absorption":
+                    result = analyze_chemical(input_id, input_spectrum_type)
+                elif input_spectrum_type == "reflection":
+                    result = analyze_chemical(input_id, input_spectrum_type, input_compound_concentration)
                 results.append(result)
             except NotFoundError as e:
                 e.by_id()
-        setattr(namespace, self.dest, results) #results saved to args.ids
         display_multiple(results)
 class ARGPARSE_multiple_chemical_names(argparse.Action):
     def __call__(self, parser, namespace, input_names, option_string=None):
         results = []
+        input_spectrum_type = getattr(namespace, 'spectrum_type', None)
+        input_compound_concentration = getattr(namespace, 'concentration', None)
+
         for name in input_names:
             try:
                 name = name.replace(" ","-").upper()
@@ -189,26 +239,29 @@ class ARGPARSE_multiple_chemical_names(argparse.Action):
                 if not candidates.is_empty():
                     input_id = candidates.select("Compound_ID").to_numpy()[0][0]
                     input_id = input_id.split("_")[1]
-                    result = analyze_chemical(input_id)
+                    
+                    if input_spectrum_type == "absorption":
+                        result = analyze_chemical(input_id, input_spectrum_type)
+                    elif input_spectrum_type == "reflection":
+                        result = analyze_chemical(input_id, input_spectrum_type, input_compound_concentration)
                     results.append(result)
                 else:
                     raise NotFoundError
             except NotFoundError as e:
                 e.by_name()
-        setattr(namespace, self.dest, results) #results saved to args.names
         display_multiple(results)
-
 
 parser = argparse.ArgumentParser(description="Plot absorption/reflection spectrum of phytocompound. Predict plausible concentrations of phytocompounds from observed color of a plant part.") #some primary plant compounds like chlorophyll are excluded from the dataset!
 
 parser.add_argument("-analyze_compound", action="store_true", help="An approximate absorption/reflection spectrum for 120-800 nm is computed for a single compound.")  
+parser.add_argument("-spectrum_type", choices=["absorption", "reflection"], action=store_spectrum_type, help="Choose whether to compute molar [absorption] spectrum or [reflection] (observed) spectrum of compound.")
+parser.add_argument("-c", "--concentration", type=float, action=store_concentration, help="Choose whether to compute molar [absorption] spectrum or [reflection] (observed) spectrum of compound.")
 parser.add_argument("-hide", action="store_true", help="Hides graphs. Must download data in a specified format instead.")
 parser.add_argument("-d", "--download", nargs=1, choices=["csv", "txt", "json"], help="Downloads graph-equivalent numeric data in tabular format. After this flag, specify 'csv', 'txt', or 'json'")
 parser.add_argument("-n", "--name", type=str, nargs=1, action=ARGPARSE_analyze_chemical_name, help="Enter name of a compound in the dataset. If not found, try alternative names. If some of your compound names have dashes, surround them with quotes on either side and try again\n e.g. -n '1,8-CINEOLE' ")
 parser.add_argument("--names", type=str, nargs="+", action=ARGPARSE_multiple_chemical_names, help="Enter the names of at least two compounds in the dataset. If not found, try alternative names. If some of your compound names have dashes, surround them with quotes on either side and try again\n e.g. -n '1,8-CINEOLE' ")
 parser.add_argument("-id", metavar="CID", type=int, nargs=1, action=ARGPARSE_analyze_chemical_id, help="Enter CID/compound ID (digits only): ")
 parser.add_argument("-ids", metavar="CIDs", type=int, nargs="+", action=ARGPARSE_multiple_chemical_ids, help="Enter CID/Compound ID (digits only) of at least two compounds in the dataset.")
-parser.add_argument("-spectrum_type", choices=["absorption", "reflection"], help="Choose whether to compute molar [absorption] spectrum or [reflection] (observed) spectrum of compound.")
 class FileSelectAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         root = Tk()
@@ -231,74 +284,80 @@ class FileSelectAction(argparse.Action):
 
         #the colors and locations (and features?) in the image will be used to compute the estimated percentage concentrations of phytocompounds in the plant part, which will be output as a table and/or be graphically displayed.
         #plant_analyzer.py will handle this with a pipeline of imports already built by others
-parser.add_argument("--analyze_plant", nargs=0, action=FileSelectAction, help="Opens a file selection window to choose the .csv and .pkl plant spectrometry files. Estimated percentage concentrations of phytocompounds in the plant part will be computed") # nargs=0 tells argparse not to accept command-line string values
+parser.add_argument("-analyze_plant", nargs=0, action=FileSelectAction, help="Opens a file selection window to choose the .csv and .pkl plant spectrometry files. Estimated percentage concentrations of phytocompounds in the plant part will be computed") # nargs=0 tells argparse not to accept command-line string values
 
-args = parser.parse_args()
+def main(): #actual execution
+    args = parser.parse_args()
+    #if __name__ == "__main__":
 
-has_compound = bool(args.analyze_compound or args.id or args.ids or args.name or args.names) #boolean casting to safely handle Nonetype
-has_plant = bool(getattr(args, "csv_path", None) and getattr(args, "pkl_path", None))
 
-if (has_compound ^ has_plant):
-    print("Plant spectrometry files successfully received.")
-else:
-    sys.exit("Error: exactly one of --analyze_compound or --analyze_plant must be used.")
+    has_compound = bool(args.analyze_compound or args.id or args.ids or args.name or args.names) #boolean casting to safely handle Nonetype
+    has_plant = bool(getattr(args, "csv_path", None) and getattr(args, "pkl_path", None))
 
-if has_plant and args.spectrum_type:
-    sys.exit("Error: can currently only specify spectrum type if analyze compound, not when analyzing plant.")
-elif has_compound and not bool(args.spectrum_type):
-    sys.exit("Error: must specify spectrum type.")
+    if not (has_compound ^ has_plant):
+        sys.exit("Error: exactly one of --analyze_compound or --analyze_plant must be used.")
 
-def if_displaying():
-    if has_compound:
-            if args.spectrum_type=="absorption":
-                if args.id or args.name: #only single compound
-                    print("[this should display a graph for the single compound specified]")
-                elif args.ids or args.names: #multiple compounds
-                    print("[this should display a graph with a superposed curve for each compound in the list]")
-                else:
-                    sys.exit("Error: no compound or plant was specified")
-            elif args.spectrum_type=="observed":
-                #this will download the reflectance spectrum data instead
-                print("[this should graph the observed (reflectance) spectrum data. Remove print statements after debugging and verifying downloads work]")
-    elif has_plant: #checking if the attached image path is anything other than None or nonexistent
-        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-        plant_analyzer_path = os.path.join(SCRIPT_DIR, "plant_analyzer.py")
-        command = [sys.executable, plant_analyzer_path, "-file_paths", str(args.csv_path), str(args.pkl_path)] #printing rather than downloading for now
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        print(result.stdout)
-    else:
-        print("[this shouldn't be printing! fix logic branching to return an error earlier]")
+    if has_plant and args.spectrum_type:
+        sys.exit("Error: can only specify spectrum type if analyze compound, not when analyzing plant.")
+    elif has_compound and not bool(args.spectrum_type):
+        sys.exit("Error: must specify spectrum type.")
 
-def if_downloading():
-    if args.download: #NOTE: check that args.download = False when nothing selected?
-        print("Downloading numeric data in the specified format:" ,args.download)
+    def if_displaying():
         if has_compound:
-            if args.spectrum_type=="absorption":
-                if args.id or args.name: #only single compound
-                    print("[this should download a file for the single compound specified]")
-                elif args.ids or args.names: #multiple compounds
-                    print("[this should download a file for each compound in the list]")
-                else:
-                    sys.exit("Error: no compound or plant was specified")
-            elif args.spectrum_type=="observed":
-                #this will download the reflectance spectrum data instead
-                print("[this should download the observed (reflectance) spectrum data. Remove print statements after debugging and verifying downloads work]")
+                if args.spectrum_type=="absorption":
+                    if args.id or args.name: #only single compound
+                        print("[this should display a graph for the single compound specified]")
+                    elif args.ids or args.names: #multiple compounds
+                        print("[this should display a graph with a superposed curve for each compound in the list]")
+                    else:
+                        sys.exit("Error: no compound or plant was specified")
+                elif args.spectrum_type=="reflection":
+                    #this will download the reflectance spectrum data instead
+                    print("[this should graph the observed (reflectance) spectrum data. Remove print statements after debugging and verifying downloads work]")
         elif has_plant: #checking if the attached image path is anything other than None or nonexistent
-            command = [sys.executable, "plant_analyzer.py", "-file_paths", str(args.csv_path), str(args.pkl_path), "-download_type", args.download]
+            SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+            plant_analyzer_path = os.path.join(SCRIPT_DIR, "plant_analyzer.py")
+            command = [sys.executable, plant_analyzer_path, "-file_paths", str(args.csv_path), str(args.pkl_path)] #printing rather than downloading for now
             result = subprocess.run(command, capture_output=True, text=True, check=True)
             print(result.stdout)
         else:
             print("[this shouldn't be printing! fix logic branching to return an error earlier]")
 
-if not args.hide:
-    print("--displaying--")
-    if_displaying()
-if args.download:
-    print("--downloading--")
-    if_downloading()
-if args.hide and not args.download:
-    sys.exit("Error: cannot choose to avoid both graphic display and numeric data download.") #return an error if user neither downloads or wants to display output
-        
+    def if_downloading():
+        if args.download: #NOTE: check that args.download = False when nothing selected?
+            print("Downloading numeric data in the specified format:" ,args.download)
+            if has_compound:
+                if args.spectrum_type=="absorption":
+                    if args.id or args.name: #only single compound
+                        print("[this should download a file for the single compound specified]")
+                    elif args.ids or args.names: #multiple compounds
+                        print("[this should download a file for each compound in the list]")
+                    else:
+                        sys.exit("Error: no compound or plant was specified")
+                elif args.spectrum_type=="reflection":
+                    #this will download the reflectance spectrum data instead
+                    print("[this should download the observed (reflectance) spectrum data. Remove print statements after debugging and verifying downloads work]")
+            elif has_plant: #checking if the attached image path is anything other than None or nonexistent
+                command = [sys.executable, "plant_analyzer.py", "-file_paths", str(args.csv_path), str(args.pkl_path), "-download_type", args.download]
+                result = subprocess.run(command, capture_output=True, text=True, check=True)
+                print(result.stdout)
+            else:
+                print("[this shouldn't be printing! fix logic branching to return an error earlier]")
+
+    if not args.hide:
+        print("--displaying--")
+        if_displaying()
+    if args.download:
+        print("--downloading--")
+        if_downloading()
+    if args.hide and not args.download:
+        sys.exit("Error: cannot choose to avoid both graphic display and numeric data download.")
+
+# for edit mode installation of module: `pip uninstall Botanist -y; pip install -e .`
+# for actual installation: `pip uninstall Botanist -y; pip install .`
+
+# github committing: `git add .; git commit -m [message]; git push origin main``
+
 
 #print(args.id, args,ids, args.name, args.names) #replace all the temporary print statements with this
 
@@ -311,11 +370,6 @@ if args.hide and not args.download:
 # posterized_img = ImageOps.posterize(args.input_file, 2) #second parameter is basically resolution #do we replace the first parameter with 'f' from the block above?
 # posterized_img.save(f"./posterized_images/{args.input_file.(name)}.png")
 # OUTPUT OF C++: std::vector<std::pair<int,double>> cache; (wavenumber in cm^-1, amplitude)
-
-# display user search options with argparse --help)
-# NOTE: convolute spectrum with appropriate-width kernel?
-
-
 
 
 ''' User Settings (JSON) -- original:

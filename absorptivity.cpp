@@ -14,6 +14,7 @@
 #include <dlfcn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h> //crucial: makes python lists and c++ vectors compatible
+using Spectrum = std::vector<std::pair<double,double>>; //vector of pairs (wavelength_nm, epsilon) (M^-1 cm^-1)
 
 /*
 1. build library in c++ that can be used in python (use extern C modifiers and modify CMake settings; see below)
@@ -71,7 +72,8 @@ std::vector<std::vector<int>> groupings(const std::vector<std::vector<int>>& nei
 }
 
 //only accepting analysis in the wavelength range where individual atom absorptivities are negligible (and other data may be flawed anyway in the vacuum UV range) : 120-800nm (far UV - very near IR)
-std::vector<std::pair<int,double>> cache; //stores memory from last input: (wavenumber in cm^-1, amplitude)
+Spectrum cache_absorption; //stores memory from last input: (wavenumber in cm^-1, amplitude)
+Spectrum cache_reflection;
 
 struct BondGraph {
     std::vector<int> atomic_num;
@@ -549,7 +551,7 @@ double representative_amplitude(const ChromophoreEstimate& est) {
 // increments are additive in nm, and since wavenumber = 1e7/lambda, a uniform nm shift is NOT a uniform
 // cm^-1 shift (it varies roughly as 1/lambda^2). Converting to wavenumber only after shifting keeps every
 // line consistent with what the nm-based increment actually means.
-std::vector<std::pair<int,double>> build_modified_spectrum(const ChromophoreEstimate& est) {
+Spectrum build_modified_spectrum(const ChromophoreEstimate& est) {
     const std::vector<std::pair<double,double>>& templ = empirical_library().at(est.base_type);
     double template_peak_nm = templ.front().first, template_peak_eps = templ.front().second;
     for (const auto& pt : templ) {
@@ -559,7 +561,7 @@ std::vector<std::pair<int,double>> build_modified_spectrum(const ChromophoreEsti
     double target_eps = representative_amplitude(est);
     double scale = template_peak_eps > 0.0 ? target_eps / template_peak_eps : 1.0;
 
-    std::vector<std::pair<int,double>> out;
+    Spectrum out;
     out.reserve(templ.size());
     for (const auto& pt : templ) {
         double shifted_nm = pt.first + delta_nm;
@@ -607,7 +609,7 @@ std::vector<ChromophoreEstimate> split_enone(const BondGraph& g, const EnoneAssi
     return parts;
 }
 
-std::vector<std::pair<int,double>> resolve_fragment(
+Spectrum resolve_fragment(
     const BondGraph& g,
     const ChromophoreEstimate& est,
     const EnoneAssignment* enone_ref
@@ -618,10 +620,10 @@ std::vector<std::pair<int,double>> resolve_fragment(
             split_enone(g, *enone_ref, est.lambda_nm, est.double_bond_count);
 
         if (!parts.empty()) {
-            std::vector<std::pair<int,double>> out;
+            Spectrum out;
 
             for (const ChromophoreEstimate& part : parts) {
-                std::vector<std::pair<int,double>> sub =
+                Spectrum sub =
                     resolve_fragment(g, part, NULL);
                 out.insert(out.end(), sub.begin(), sub.end());
             }
@@ -641,12 +643,12 @@ std::vector<std::pair<int,double>> resolve_fragment(
     return {{wavenumber, representative_amplitude(est)}};
 }
 
-std::vector<std::pair<int,double>> molecule_spectrum(const std::string& SMILES, const size_t& num_atoms,
+Spectrum absorption_spectrum(const std::string& SMILES, const size_t& num_atoms,
                                                        const std::vector<std::pair<int,int>>& pi_electrons_ordered,
                                                        const std::vector<std::array<int,7>>& bond_info,
                                                        const std::vector<std::array<int,5>>& atom_info) { //returns (wavenumber cm^-1, amplitude) pairs
-    cache.clear(); //clearing cache and memory for new decomposition
-    cache.shrink_to_fit();
+    cache_absorption.clear(); //clearing cache and memory for new decomposition -- INSERT ANY USAGE OF SAVED CACHE BEFORE THIS LINE
+    cache_absorption.shrink_to_fit();
 
     //Step 1: Chromophore division
     //adjacency-list + sparse edge maps: O(n + m), replacing the old O(n^2) dense adjacency-matrix build
@@ -685,12 +687,32 @@ std::vector<std::pair<int,double>> molecule_spectrum(const std::string& SMILES, 
     //direct match -- see resolve_fragment/split_enone), shifted in nm-space to its rule-based lambda_max,
     //rescaled to a representative amplitude, and the resulting lines from every fragment are pooled.
     for (const ChromophoreEstimate& est : estimates) {
-        std::vector<std::pair<int,double>> piece = resolve_fragment(molecular_graph, est, est.is_enone ? &est.enone : NULL);
+        Spectrum piece = resolve_fragment(molecular_graph, est, est.is_enone ? &est.enone : NULL);
         std::cout << "  -> spectral points: " << piece.size() << '\n'; //DIAGNOSTIC
-        cache.insert(cache.end(), piece.begin(), piece.end());
+        cache_absorption.insert(cache_absorption.end(), piece.begin(), piece.end());
     }
-    std::sort(cache.begin(), cache.end());
-    return cache;
+    std::sort(cache_absorption.begin(), cache_absorption.end());
+    
+    return cache_absorption; //btw recall that cache stores memory from last input (in case needed) //and duplicate values shouldn't matter since we convolute later
+    //we are returning the molar extinction coefficient as a 'function' of wavelength (epsilon, M^-1 cm^-1), not a concentration/path-length-scaled absorbance
+}
+
+Spectrum reflection_spectrum(const std::string& SMILES, const size_t& num_atoms,
+                                                       const std::vector<std::pair<int,int>>& pi_electrons_ordered,
+                                                       const std::vector<std::array<int,7>>& bond_info,
+                                                       const std::vector<std::array<int,5>>& atom_info,
+                                                       const double& concentration) {
+                                                        
+    cache_reflection.reserve(cache_absorption.size()); //optimization
+    cache_reflection.clear(); //use the reflection cache if necessary BEFORE this line
+
+    Spectrum absorption = absorption_spectrum(SMILES, num_atoms, pi_electrons_ordered, bond_info, atom_info);
+    for (const auto& line : absorption) {
+        double bulk_absorption = 4.60517019 * concentration * line.second;
+        double F = bulk_absorption/600.0; //direct remission function
+        cache_reflection.push_back(std::make_pair(line.first, 1 + F - std::sqrt(F*F + 2*F))); //reflection
+    }
+    return cache_reflection;
 }
 
 // inputs in bond_info: atom order/index 1 & 2, element 1 & 2 atomic numbers, bond status, bond order, bond-in-ring
@@ -702,19 +724,26 @@ TRANS-LINALOOL-OXIDE / C[C@]1(CC[C@H](O1)C(C)(C)O)C=C
 ZINC,Root,CID_23994,[Zn]
 */
 
-
 PYBIND11_MODULE(absorptivity, m) {
-    m.doc() = "Absorptivity calculator (v0)";
-    m.def("compute_spectrum", [](const std::string SMILES, const int& num_atoms,
+    m.doc() = "Plant spectrum calculator (v2)";
+    m.def("compute_absorption_spectrum", [](const std::string SMILES, const int& num_atoms,
                                   const std::vector<std::pair<int,int>> pi_electrons_ordered,
                                   const std::vector<std::array<int,7>> bond_info,
                                   const std::vector<std::array<int,5>> atom_info) {
-        return molecule_spectrum(SMILES, static_cast<size_t>(num_atoms), pi_electrons_ordered, bond_info, atom_info);
+        return absorption_spectrum(SMILES, static_cast<size_t>(num_atoms), pi_electrons_ordered, bond_info, atom_info);
     }, "Decomposes a molecule into chromophores and remainder groups, identifies auxochromes, matches (or "
        "recursively splits, on a miss) each chromophore against a small empirical UV/Vis template library, and "
        "superposes the shifted/rescaled templates into the molecule's overall spectrum for 120-800 nm as "
        "(wavenumber cm^-1, amplitude) pairs. Amplitudes are per-chromophore relative intensities, not a "
        "concentration/path-length-scaled absorbance.");
+    m.def("compute_reflection_spectrum", [](const std::string SMILES, const int& num_atoms,
+                                  const std::vector<std::pair<int,int>> pi_electrons_ordered,
+                                  const std::vector<std::array<int,7>> bond_info,
+                                  const std::vector<std::array<int,5>> atom_info,
+                                  const double& concentration) {
+        return reflection_spectrum(SMILES, static_cast<size_t>(num_atoms), pi_electrons_ordered, bond_info, atom_info, concentration);
+    }, "Computes the reflection spectrum. In addition to the arguments used in computer_absorption_spectrum, "
+       "this function also takes a concentration argument (in mol/L) to scale the absorption spectrum into a reflection spectrum.");
 }
 
 /*
